@@ -4,7 +4,9 @@ import multer from "multer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 import fs from "fs";
+import path from "path";
 
+// Tell fluent-ffmpeg to use the static binary
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
@@ -13,55 +15,80 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Ensure folders exist (Railway-safe)
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-if (!fs.existsSync("outputs")) fs.mkdirSync("outputs");
+// ==========================================
+// 🔧 RAILWAY FIX: USE /tmp DIRECTORY
+// ==========================================
+// Railway only allows writing files to /tmp
+const UPLOAD_DIR = "/tmp/uploads";
+const OUTPUT_DIR = "/tmp/outputs";
 
-// Health check
-app.get("/", (req, res) => {
-  res.json({ status: "OK", message: "Watermark backend is running 🚀" });
-});
+// Ensure directories exist
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-// Multer setup
+// ==========================================
+// 📂 MULTER CONFIG
+// ==========================================
 const storage = multer.diskStorage({
-  destination: "uploads/",
+  destination: UPLOAD_DIR,
   filename: (_, file, cb) => {
-    cb(null, Date.now() + "-" + file.originalname);
+    // Replace spaces with underscores to prevent FFmpeg errors
+    const safeName = Date.now() + "-" + file.originalname.replace(/\s+/g, "_");
+    cb(null, safeName);
   },
 });
 
 const upload = multer({ storage });
 
-// Video processing
+// ==========================================
+// 🚀 PROCESS ROUTE
+// ==========================================
 app.post("/process-video", upload.single("video"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No video uploaded" });
   }
 
   const inputPath = req.file.path;
-  const outputPath = `outputs/clean-${Date.now()}.mp4`;
+  const outputFilename = `clean-${Date.now()}.mp4`;
+  const outputPath = path.join(OUTPUT_DIR, outputFilename);
 
-  console.log("🎬 Processing:", inputPath);
+  console.log("🎬 Processing Started:", inputPath);
 
   ffmpeg(inputPath)
-    // Placeholder watermark logic
-    .videoFilters("crop=in_w-200:in_h-100:0:0")
+    .videoFilters("crop=in_w-200:in_h-100:0:0") // Your crop logic
     .outputOptions("-movflags faststart")
+    .on("start", (cmd) => console.log("Spawned FFmpeg:", cmd))
     .on("end", () => {
-      console.log("✅ Processing finished");
+      console.log("✅ Processing finished. Sending file...");
 
-      res.download(outputPath, "clean.mp4", () => {
-        fs.unlinkSync(inputPath);
-        fs.unlinkSync(outputPath);
+      res.download(outputPath, "clean.mp4", (err) => {
+        if (err) console.error("Download Error:", err);
+
+        // CLEANUP: Delete files after sending to save space
+        try {
+          if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        } catch (e) {
+          console.error("Cleanup failed:", e);
+        }
       });
     })
-    .on("error", (err) => {
-      console.error("❌ FFmpeg error:", err);
+    .on("error", (err, stdout, stderr) => {
+      console.error("❌ FFmpeg Failed:", err.message);
+      console.error("FFmpeg Stderr:", stderr); // Logs the real reason if it fails
+
       if (!res.headersSent) {
-        res.status(500).json({ error: "Video processing failed" });
+        res.status(500).json({ 
+          error: "Video processing failed", 
+          details: err.message 
+        });
       }
-      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      
+      // Attempt cleanup on error
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      } catch (e) {}
     })
     .save(outputPath);
 });
