@@ -46,7 +46,7 @@ const storage = multer.diskStorage({
 const upload = multer({ 
   storage,
   limits: { 
-    fileSize: 50 * 1024 * 1024
+    fileSize: 50 * 1024 * 1024 // 50MB Limit
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("video/")) {
@@ -70,11 +70,15 @@ app.post("/process-video", upload.single("video"), (req, res) => {
   const outputFilename = `clean-${Date.now()}.mp4`;
   const outputPath = path.join(OUTPUT_DIR, outputFilename);
 
-
   ffmpeg(inputPath)
     .videoFilters("crop=in_w-200:in_h-100:0:0")
-    .outputOptions("-movflags faststart")
-    .on("start", (cmd) => console.log("Spawned FFmpeg"))
+    .outputOptions([
+        "-threads 1",                  
+        "-preset ultrafast",          
+        "-max_muxing_queue_size 1024",
+        "-movflags faststart"         
+    ])
+    .on("start", (cmd) => console.log("Spawned FFmpeg with RAM optimization"))
     .on("end", () => {
       res.download(outputPath, "clean.mp4", (err) => {
         if (err && !res.headersSent) {
@@ -86,12 +90,14 @@ app.post("/process-video", upload.single("video"), (req, res) => {
     })
     .on("error", (err, stdout, stderr) => {
       console.error("FFmpeg Failed:", err.message);
+      console.error("FFmpeg Stderr:", stderr); 
+      
       cleanupFiles([inputPath, outputPath]);
 
       if (!res.headersSent) {
         res.status(500).json({ 
           error: "Video processing failed", 
-          details: err.message 
+          details: "Server is busy or video is too complex. Try a smaller file." 
         });
       }
     })
