@@ -4,7 +4,6 @@
 [![Node.js](https://img.shields.io/badge/Node.js-v18+-green.svg)](https://nodejs.org/)
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-Processed-orange)](https://ffmpeg.org/)
 [![Frontend](https://img.shields.io/badge/Frontend-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
-[![Deploy](https://img.shields.io/badge/Deploy-Railway-purple)](https://railway.app/)
 
 ---
 
