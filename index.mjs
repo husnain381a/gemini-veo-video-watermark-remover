@@ -6,6 +6,7 @@ import ffmpegPath from "ffmpeg-static";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { exec } from "child_process";
 
 // ==========================================
 // SETUP & DIRECTORIES
@@ -24,6 +25,7 @@ app.use(express.json());
 const UPLOAD_DIR = process.env.RAILWAY_ENVIRONMENT ? "/tmp/uploads" : "./uploads";
 const OUTPUT_DIR = process.env.RAILWAY_ENVIRONMENT ? "/tmp/outputs" : "./outputs";
 
+// Ensure directories exist
 [UPLOAD_DIR, OUTPUT_DIR].forEach((dir) => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -31,7 +33,21 @@ const OUTPUT_DIR = process.env.RAILWAY_ENVIRONMENT ? "/tmp/outputs" : "./outputs
 });
 
 // ==========================================
-// MULTER CONFIG (SECURED)
+// RAILWAY MEMORY FIX (SWAP FILE)
+// ==========================================
+if (process.env.RAILWAY_ENVIRONMENT) {
+  console.log("Attempting to create Swap file for extra RAM...");
+  exec("fallocate -l 512M /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile", (err) => {
+    if (err) {
+      console.warn("Could not create swap file (Non-critical):", err.message);
+    } else {
+      console.log("Success: +512MB Swap Memory enabled.");
+    }
+  });
+}
+
+// ==========================================
+// MULTER CONFIG
 // ==========================================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -70,16 +86,25 @@ app.post("/process-video", upload.single("video"), (req, res) => {
   const outputFilename = `clean-${Date.now()}.mp4`;
   const outputPath = path.join(OUTPUT_DIR, outputFilename);
 
+  console.log(`Processing: ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
+
   ffmpeg(inputPath)
-    .videoFilters("crop=in_w-200:in_h-100:0:0")
+    .videoFilters([
+        "scale='min(1280,iw)':-2", 
+        "crop=in_w-200:in_h-100:0:0"
+    ])
     .outputOptions([
         "-threads 1",                  
         "-preset ultrafast",          
-        "-max_muxing_queue_size 1024",
-        "-movflags faststart"         
+        "-max_muxing_queue_size 256",  
+        "-crf 28",                     
+        "-movflags faststart"          
     ])
-    .on("start", (cmd) => console.log("Spawned FFmpeg with RAM optimization"))
+    .on("start", (cmd) => {
+        console.log("Spawned FFmpeg with RAM optimization");
+    })
     .on("end", () => {
+      console.log("Processing finished successfully.");
       res.download(outputPath, "clean.mp4", (err) => {
         if (err && !res.headersSent) {
              console.error("Download Error:", err);
@@ -89,16 +114,26 @@ app.post("/process-video", upload.single("video"), (req, res) => {
       });
     })
     .on("error", (err, stdout, stderr) => {
-      console.error("FFmpeg Failed:", err.message);
-      console.error("FFmpeg Stderr:", stderr); 
+      // DETECT OOM KILLS
+      const isOOM = err.message.includes("SIGKILL") || err.message.includes("137");
       
+      console.error(isOOM ? "FFmpeg process was KILLED (Out of Memory)" : `FFmpeg Error: ${err.message}`);
+      if (stderr) console.error("FFmpeg Stderr:", stderr);
+
       cleanupFiles([inputPath, outputPath]);
 
       if (!res.headersSent) {
-        res.status(500).json({ 
-          error: "Video processing failed", 
-          details: "Server is busy or video is too complex. Try a smaller file." 
-        });
+        if (isOOM) {
+            res.status(507).json({
+                error: "Server Memory Exceeded",
+                details: "The video is too complex for the free server. Please try a smaller file or lower resolution."
+            });
+        } else {
+            res.status(500).json({ 
+                error: "Processing Failed", 
+                details: "An error occurred while processing the video." 
+            });
+        }
       }
     })
     .save(outputPath);
@@ -121,7 +156,6 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: "Invalid file type. Please upload a video." });
   }
 
-  // Default error handler
   console.error("Server Error:", err);
   if (!res.headersSent) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -133,7 +167,9 @@ function cleanupFiles(paths) {
   paths.forEach((p) => {
     try {
       if (fs.existsSync(p)) fs.unlinkSync(p);
-    } catch (e) { console.error(`Failed to delete ${p}`, e); }
+    } catch (e) { 
+        // Ignore unlink errors
+    }
   });
 }
 
@@ -142,5 +178,5 @@ function cleanupFiles(paths) {
 // ==========================================
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Max Upload Size: 50MB`);
+  console.log(`Environment: ${process.env.RAILWAY_ENVIRONMENT ? "Railway" : "Local"}`);
 });
